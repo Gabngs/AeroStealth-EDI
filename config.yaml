@@ -1,0 +1,45 @@
+# Configuración del agente de visión
+
+capture:
+  source: process            # process | window | monitor
+  process_name: "AceOnline"  # source: process → nombre del .exe (parcial, sin importar mayúsculas).
+                             #   Mira el nombre exacto con: python scripts/listar_ventanas.py
+  window_title: "AceOnline"  # source: window → parte del título de la ventana
+  monitor: 1                 # source: monitor → 1 = pantalla principal
+  view_fps: 60               # fps de la vista en vivo
+  max_width: 1920            # el frame se reduce a este ancho antes de procesar/guardar (0 = resolución nativa)
+
+record:
+  fps: 5                     # capturas por segundo para el dataset
+  jpg_quality: 85
+  min_change: 0.02           # bajo este cambio respecto al cuadro anterior se considera "quieto" (0 = nunca)
+  idle_fps: 1                # capturas por segundo mientras estás quieto (nunca se deja de guardar)
+
+classes: [enemigo, drop]     # clases que se etiquetan / detectan (ver docs/guia_dataset.md)
+
+# Controles del juego (para fases 2+; aún no los usa ningún módulo)
+controls:
+  move: {forward: w, left: a, back: s, right: d}   # en tierra; en vuelo a/d inclinan
+  takeoff_toggle: space      # despegar / mantener para subir
+  pickup: q                  # recoger drops en vuelo
+  skills: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  next_skillbar: tab         # hay 3 barras
+  release_lock: shift        # suelta la mira
+  weapon_basic: mouse_left
+  weapon_advanced: mouse_right   # solo hace daño con el objetivo dentro del rango (radar)
+  # orientación: con el mouse (movimiento relativo)
+
+detector:
+  kind: color                # none | color | yolo
+  conf: 0.4
+  yolo_weights: models/best.pt
+  layer_ids: [0, 2, 4, 6]    # capas de YOLO a visualizar
+  color:                     # marca del enemigo por color (HSV, OpenCV: H 0-179)
+    hsv_low: [0, 150, 150]
+    hsv_high: [10, 255, 255]
+    min_area: 150
+
+train:
+  epochs: 30
+  imgsz: 640
+  base_model: yolov8n.pt
