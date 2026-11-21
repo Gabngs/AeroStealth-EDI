@@ -166,8 +166,7 @@ class MainWindow(QMainWindow):
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         tl.addWidget(self.view, 1)
-        tl.addWidget(self.layers_hint)
-        tl.addLayout(layers_row)
+        # el panel de capas (mosaicos de activaciones) está oculto: se rehará como visor de la red
 
         self.log = QPlainTextEdit(readOnly=True)
         self.log.setMaximumBlockCount(2000)
@@ -333,6 +332,7 @@ class MainWindow(QMainWindow):
             self._was_locked = locked
 
     def _show_layers(self, layers):
+        return  # oculto por ahora
         if not layers:
             return
         self.layers_hint.setText("Capas de la red (canales con más actividad)")

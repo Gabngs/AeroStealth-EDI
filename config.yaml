@@ -2,7 +2,7 @@
 
 capture:
   source: process            # process | window | monitor
-  process_name: "AceOnline"  # source: process → nombre del .exe (parcial, sin importar mayúsculas).
+  process_name: "Engine"    # source: process → nombre del .exe (parcial, sin importar mayúsculas).
                              #   Mira el nombre exacto con: python scripts/listar_ventanas.py
   window_title: "AceOnline"  # source: window → parte del título de la ventana
   monitor: 1                 # source: monitor → 1 = pantalla principal
@@ -19,19 +19,104 @@ classes: [enemigo, drop]     # clases que se etiquetan / detectan (ver docs/guia
 
 # Controles del juego (para fases 2+; aún no los usa ningún módulo)
 controls:
+  killswitch: xbutton2       # global: detiene el bot al instante (botón lateral "adelante" del mouse Logitech)
   move: {forward: w, left: a, back: s, right: d}   # en tierra; en vuelo a/d inclinan
-  takeoff_toggle: space      # despegar / mantener para subir
+  # En tierra solo AVANZA con w; a/d giran la nave sobre su eje (no se desplaza de lado). Para reposicionarse: girar y avanzar.
+  # Si un enemigo me marca (flechas rojas) pero no se deja fijar, suele haber un obstáculo (árbol) en medio: moverse para despejar la línea.
+  collect_drops:                # los drops vienen hacia la nave solo si está cerca; si me quedo quieto se acumulan (y laguean el server)
+    detect: yellow_text         # los drops se ven como texto amarillo en el suelo ("A Type Condensed Energy Kit (12 piezas)")
+    action: approach            # avanzar hacia el grupo de drops hasta que lleguen a la nave; q recoge los que están en vuelo
+  pause_on_screen: ["Verificación anti-AFK"]   # si aparece esta ventana el bot se detiene y avisa; no la resuelve
+  takeoff_toggle: space      # en tierra: despegar. EN VUELO: space = turbo
+  # Vuelo: s = baja la velocidad; el mouse controla la dirección; cerca del suelo aterriza solo.
+  # Uso típico (lo deja trabajando el usuario): la nave se coloca en un punto con ~6 calabazas a la vista y pocos drops
+  # cerca; los drops lejanos no se recogen (están repartidos por todo el mapa). Si se acumulan cerca: despegar, ir despacio (s) y volver.
   pickup: q                  # recoger drops en vuelo
   skills: [1, 2, 3, 4, 5, 6, 7, 8, 9]
-  next_skillbar: tab         # hay 3 barras
+  next_skillbar: tab         # hay 3 barras (tab las recorre en ciclo)
+  # Las habilidades se reconocen por su ICONO (assets/skills/), no por la posición: cada gear arma sus
+  # barras distinto. El bot recorre las barras con tab hasta ver el icono y pulsa esa tecla (1-9, 0 = 10º slot).
+  # Hay 4 gears (A, I, M, B). Comparten: fire_shot, missile_shot, concentration, defense_up, evasion_up
+  # (la mayoría de gears); el resto es propio de cada clase.
+  skill_icons:
+    siege_mode: assets/skills/siege_mode.png                   # A-GEAR: pega más fuerte en tierra. Cancela ground_accelerator y
+                                                               #   DETIENE la nave en seco. FIJA la mira en el objetivo.
+                                                               #   Soltar la mira: (fácil) desactivar siege (pulsarla otra vez) y luego shift;
+                                                               #   (difícil) mover el mouse y pulsar shift con siege activa
+    air_siege_mode: assets/skills/air_siege_mode.png           # lo mismo pero en el aire (no se usa)
+    siege_defense: assets/skills/siege_defense.png
+    ground_accelerator: assets/skills/ground_accelerator.png   # ráfaga de velocidad en tierra
+    barrier: assets/skills/barrier.png                         # barrera contra daño avanzado (misiles)
+    remedy: assets/skills/remedy.png                           # recupera escudo
+    collision_absorb: assets/skills/collision_absorb.png       # menos daño por choque
+    camouflage: assets/skills/camouflage.png
+    hyper_shot: assets/skills/hyper_shot.png
+    fire_shot: assets/skills/fire_shot.png                     # buff: sube el daño estándar (std)
+    missile_shot: assets/skills/missile_shot.png               # buff: sube el daño avanzado
+    concentration: assets/skills/concentration.png             # buff: sube la probabilidad (prob)
+    defense_up: assets/skills/defense_up.png                   # buff: defensa
+    evasion_up: assets/skills/evasion_up.png                   # buff: evasión
+    ammo_recharge_box: assets/skills/ammo_recharge_box.png     # ítem de la barra 1 (slot 0), con contador de unidades
+  bot_skills:
+    attack: siege_mode            # activa para matar
+    buffs: [fire_shot, concentration]   # los únicos buffs que usa el bot
+    stealth: camouflage           # invisible: los enemigos dejan de marcarte (aggro_marker) y puedes seguir pegando
+    stealth_when: aggro_marker    # se activa cuando aparece una marca roja de aggro sobre algún enemigo
+    ammo: ammo_recharge_box       # se usa cuando el contador de munición (arriba a la izquierda) llega a 0
+  ammo_counters: [std, advanced]  # arriba a la izquierda: el de la izquierda = arma estándar (05721), el de la derecha = arma avanzada (07620). Bajan al disparar
+  active_skill_icons: top_left    # los iconos junto al cubo (arriba a la izquierda) muestran habilidades/buffs activos
+  # Estados del objetivo (el rombo naranja NO significa fijado):
+  lock_indicator: green_arrows  # fijado = flechas verdes ▶ ◀ a los lados + barra de vida arriba. Con eso se mata con el arma ESTÁNDAR
+  lock_marker: orange_ring      # fijado y lejos: anillo naranja con 4 puntas (p. ej. a 1196)
+  range_indicator: orange_diamond   # rombo naranja = además en rango del arma AVANZADA (misiles); visto desde ~850 hacia cerca, no a 1188+
+  radar:                        # Tactical Radar: sus datos cambian según el gear (tooltip del inventario)
+    gear_A:
+      lock_range_std: 1350      # rango de mira trabada (S): hasta aquí se puede fijar y disparar el arma estándar
+      lock_range_adv: 850       # rango de mira trabada (A): el rombo naranja sale desde aquí hacia cerca
+      object_radius: 900        # radio de sensibilidad de objeto (por confirmar para qué se usa: drops/radar)
+    # gear_I, gear_M, gear_B: pendientes, se rellenan con el tooltip de su radar
+  approach_when_far: true       # más allá de lock_range_std (p. ej. 1400) no se puede ni fijar: se acerca con w/a/s/d.
+                                #   Entre std y adv se puede matar con el arma estándar; con el rombo también la avanzada
+  toggle_key: [period, numpad_dot]   # "." inicia el bot si está detenido y lo pausa si funciona (f10 se descartó: existe en el juego)
+  exit_key: [plus, numpad_plus]      # "+" cierra el programa entero
+  siege_key: "1"                     # Siege Mode del A-GEAR (interruptor): más daño; detiene la nave; se apaga para ir al siguiente
+  line_of_sight: true           # un obstáculo (árbol, relieve) entre la nave y el objetivo bloquea el daño aunque marque rango
+  aggro_marker: red_arrows      # ▶▶ nombre ◀◀ en rojo sobre un enemigo = me está marcando y me atacará
+  edge_warning: "OUT OF FLYING AREA"   # texto central: estás en el borde del mapa; hay que alejarse
   release_lock: shift        # suelta la mira
   weapon_basic: mouse_left
   weapon_advanced: mouse_right   # solo hace daño con el objetivo dentro del rango (radar)
   # orientación: con el mouse (movimiento relativo)
 
+launcher:                    # auto-login: abre el launcher y pulsa JUGAR (usa la sesión guardada)
+  exe: 'E:\Juegos\AeroRivals\AeroRivals Launcher v1.1.7.45.exe'
+  cwd: 'E:\Juegos\AeroRivals'
+  window_title: "AeroRivals Launcher"
+  window_mode: false              # marca la casilla "Ventana" antes de jugar (el juego abre en ventana)
+  window_checkbox: [0.682, 0.733]  # casilla "Ventana", relativa a la ventana del launcher
+  play_button: [0.827, 0.652]      # posición de JUGAR relativa a la ventana (x, y)
+  play_rgb_low: [20, 140, 190]     # color medio del botón cuando está activo (RGB)
+  play_rgb_high: [110, 230, 255]
+  open_timeout: 60                 # s esperando que aparezca la ventana
+  ready_timeout: 600               # s esperando a que termine de actualizar
+  settle_delay: 1.0
+
+gear_select:                 # pantalla "Seleccionar nave": el bot solo entra con A-GEAR
+  target: gear_A
+  key: right                 # flecha que cambia de nave (right | left)
+  max_presses: 8
+  threshold: 0.8             # parecido mínimo del nombre con la plantilla
+  settle_delay: 1.0
+  name_box: [880, 940, 160, 28]        # x, y, ancho, alto del nombre en 1920x1080
+  accept_button: [0.6, 0.948]          # Aceptar, relativo a la ventana
+  templates:                 # recortes del nombre (assets/); añade gear_M, gear_B si hace falta
+    gear_A: assets/name_gear_A.png
+    gear_I: assets/name_gear_I.png
+
 detector:
-  kind: color                # none | color | yolo
+  kind: yolo               # none | color | yolo
   conf: 0.4
+  max_det: 10              # máximo de enemigos por cuadro (evita saturar)
   yolo_weights: models/best.pt
   layer_ids: [0, 2, 4, 6]    # capas de YOLO a visualizar
   color:                     # marca del enemigo por color (HSV, OpenCV: H 0-179)

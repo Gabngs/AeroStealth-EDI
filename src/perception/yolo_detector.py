@@ -12,6 +12,7 @@ class YoloDetector:
         d = cfg["detector"]
         self.weights = ROOT / d["yolo_weights"]
         self.layer_ids = d.get("layer_ids", [0, 2, 4, 6])
+        self.max_det = d.get("max_det", 10)
         self.model = None
         self._acts: dict[int, np.ndarray] = {}
 
@@ -43,7 +44,7 @@ class YoloDetector:
     def detect(self, frame, conf: float = 0.4) -> list[Detection]:
         if self.model is None:
             self._load()
-        r = self.model.predict(frame, conf=conf, verbose=False, imgsz=640)[0]
+        r = self.model.predict(frame, conf=conf, verbose=False, imgsz=640, max_det=self.max_det)[0]
         dets = []
         for b in r.boxes:
             x1, y1, x2, y2 = b.xyxy[0].tolist()
