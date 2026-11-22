@@ -67,6 +67,16 @@ def main() -> None:
 
         threading.Thread(target=auto, daemon=True, name="auto").start()
 
+    if "--start" in sys.argv:                                     # arranca ya activo, sin límite de tiempo (se para con Pausar/Cerrar)
+        def start() -> None:
+            while bot.msg in ("Iniciando…", "Calentando captura y modelo…"):
+                time.sleep(0.2)
+            time.sleep(1.0)
+            bot.toggle.running = True
+            bot.log("[START] Bot iniciado automáticamente.")
+
+        threading.Thread(target=start, daemon=True, name="start").start()
+
     panel = ControlPanel(cfg, bot, quit_app)                     # Iniciar / Pausar / Cerrar, sin robar el foco
     panel.show()
 

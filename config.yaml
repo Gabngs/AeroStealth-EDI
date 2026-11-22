@@ -79,6 +79,7 @@ controls:
                                 #   Entre std y adv se puede matar con el arma estándar; con el rombo también la avanzada
   toggle_key: [period, numpad_dot]   # "." inicia el bot si está detenido y lo pausa si funciona (f10 se descartó: existe en el juego)
   exit_key: [plus, numpad_plus]      # "+" cierra el programa entero
+  use_siege: true                    # false = solo apunta y dispara con el arma estándar (sin Siege), pero con habilidades y recarga
   siege_key: "1"                     # Siege Mode del A-GEAR (interruptor): más daño; detiene la nave; se apaga para ir al siguiente
   line_of_sight: true           # un obstáculo (árbol, relieve) entre la nave y el objetivo bloquea el daño aunque marque rango
   aggro_marker: red_arrows      # ▶▶ nombre ◀◀ en rojo sobre un enemigo = me está marcando y me atacará
@@ -115,7 +116,7 @@ gear_select:                 # pantalla "Seleccionar nave": el bot solo entra co
 
 detector:
   kind: yolo               # none | color | yolo
-  conf: 0.4
+  conf: 0.2                # bajo a propósito: lo dudoso (<0.4) se comprueba pasando la mira; si no se fija, se descarta
   max_det: 10              # máximo de enemigos por cuadro (evita saturar)
   yolo_weights: models/best.pt
   layer_ids: [0, 2, 4, 6]    # capas de YOLO a visualizar
