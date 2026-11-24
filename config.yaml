@@ -32,7 +32,7 @@ controls:
   # Uso típico (lo deja trabajando el usuario): la nave se coloca en un punto con ~6 calabazas a la vista y pocos drops
   # cerca; los drops lejanos no se recogen (están repartidos por todo el mapa). Si se acumulan cerca: despegar, ir despacio (s) y volver.
   pickup: q                  # recoger drops en vuelo
-  skills: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  skills: [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
   next_skillbar: tab         # hay 3 barras (tab las recorre en ciclo)
   # Las habilidades se reconocen por su ICONO (assets/skills/), no por la posición: cada gear arma sus
   # barras distinto. El bot recorre las barras con tab hasta ver el icono y pulsa esa tecla (1-9, 0 = 10º slot).
