@@ -1,5 +1,5 @@
 """Lanza el bot con la capa superpuesta sobre el juego.
-Uso: python scripts/bot.py
+Uso: python scripts/bot.py [--auto SEG] [--start] [--fijar] [--fuego SEG] [--pausa SEG]
   controls.toggle_key: inicia/detiene el bot      controls.exit_key: cierra el programa entero"""
 import ctypes
 import os
@@ -42,6 +42,14 @@ def main() -> None:
     bot = Bot(cfg, view_cb=bridge.state.emit)
     start_exit_watch(cfg["controls"].get("exit_key", "plus"), on_exit=bot.shutdown, log=bot.log,
                      active_if=lambda: is_foreground(find_hwnd(cfg["capture"])))       # "+" solo con el juego al frente
+    import src.bot as bot_mod                                     # --fuego N y --pausa N: segundos de fuego seguido y de enfriamiento del arma
+    for flag, const in (("--fuego", "FIRE_MAX_S"), ("--pausa", "COOL_S")):
+        if flag in sys.argv:
+            setattr(bot_mod, const, float(sys.argv[sys.argv.index(flag) + 1]))
+            bot.log(f"{flag} {getattr(bot_mod, const):.0f} s")
+    if "--fijar" in sys.argv:                                     # prueba de fijado: mueve la mira, fija, suelta con shift y sigue; NO dispara
+        bot.test_lock, bot.use_siege = True, False
+        bot.log("[PRUEBA] Modo prueba de fijado: no se dispara ni se usa Siege.")
     th = threading.Thread(target=bot.run, daemon=True, name="bot")
     th.start()
 

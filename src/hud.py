@@ -46,10 +46,11 @@ def locked(frame) -> bool:
     return target_hp(frame) is not None
 
 
-def green_arrows(frame):
+def green_arrows(frame, hsv=None):
     """Centro (x, y) del enemigo fijado: el punto medio entre las dos flechas verdes ▶ ◀ de sus costados, o None."""
     h, w = frame.shape[:2]
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    if hsv is None:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     m = cv2.inRange(hsv, (30, 150, 150), (50, 255, 255))
     m[: int(0.05 * h)] = 0
     m[int(0.88 * h):] = 0
@@ -73,13 +74,14 @@ def _double(pts, a, k: float) -> bool:
     return any(p is not a and abs(p[1] - a[1]) <= 4 * k and 6 * k <= abs(p[0] - a[0]) <= 30 * k for p in pts)
 
 
-def red_arrows(frame) -> list[tuple[float, float]]:
+def red_arrows(frame, hsv=None) -> list[tuple[float, float]]:
     """Posiciones (x, y) de los enemigos que te están marcando: cartel con flechas rojas ▶▶ nombre ◀◀,
     y el enemigo ~100 px debajo del texto. Lista vacía si nadie te marca."""
     h, w = frame.shape[:2]
     k = w / 1917.0
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    m = (((hsv[..., 0] < 6) | (hsv[..., 0] > 174)) & (hsv[..., 1] > 200) & (hsv[..., 2] > 200)).astype(np.uint8)
+    if hsv is None:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, (0, 201, 201), (5, 255, 255)) | cv2.inRange(hsv, (175, 201, 201), (179, 255, 255))   # rojo (más rápido que numpy)
     m[: int(0.10 * h)] = 0                                         # barra de vida del objetivo y título
     m[:int(0.28 * h), : int(0.22 * w)] = 0                         # círculo de vida/energía
     m[:int(0.28 * h), int(0.88 * w):] = 0                          # radar
@@ -278,6 +280,9 @@ def ammo_empty(frame) -> bool:
     return int(red.sum()) >= 50 * k * k
 
 
+_HEAT_ANCHOR = None   # última columna válida de la barra de munición avanzada (siempre llena): ancla si un cuadro no se lee
+
+
 def heat_bar(frame):
     """Fracción (0-1) que queda de la barra naranja sobre la munición estándar (se vacía al recalentarse el arma),
     o None si no se ve. La barra mide ~88 px y la de la munición avanzada (siempre llena) sirve de ancla."""
@@ -295,10 +300,13 @@ def heat_bar(frame):
             runs.append((st, p))
             st = x
         p = x
+    global _HEAT_ANCHOR
     big = [r for r in runs if r[1] - r[0] >= 60 * k and r[0] > 100 * k]
-    if not big:
+    if big:
+        _HEAT_ANCHOR = big[-1][0]
+    elif _HEAT_ANCHOR is None:
         return None
-    left = big[-1][0] - 124 * k                                     # la barra estándar empieza 124 px antes que la avanzada
+    left = _HEAT_ANCHOR - 124 * k                                     # la barra estándar empieza 124 px antes que la avanzada
     end = left
     for x in range(int(left), int(left + 95 * k)):
         if m[x]:

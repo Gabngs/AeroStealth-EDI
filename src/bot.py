@@ -11,6 +11,8 @@ import time
 import winsound
 from ctypes import wintypes
 
+import cv2
+
 from .afk_guard import afk_dialog_visible
 from .capture import ScreenCapture, find_hwnd
 from .config import ROOT
@@ -45,11 +47,15 @@ AMMO_LOW = 100           # munición estándar por debajo de esto: recargar (caj
 MAINT_EVERY_S = 2.0      # cada cuánto se revisan munición y buffs (solo sin enemigo fijado)
 BUFF_RETRY_S = 45.0      # tras lanzar buffs no se reintenta antes de esto: las habilidades tienen tiempo de reuso
 AMMO_RETRY_S = 45.0
-HEAT_LOW, HEAT_OK = 0.2, 0.6   # barra naranja sobre la munición: bajo HEAT_LOW se suelta el clic hasta que suba de HEAT_OK
+FIRE_MAX_S = 28.0        # el arma se recalienta a los ~30 s de disparo continuo (30-35 s según el arma): parar un poco antes
+COOL_S = 15.0            # pausa para que se enfríe; sin disparar se enfría al doble de lo que se calienta (30 s de fuego = 15 s de pausa)
 BAR_SETTLE_S = 0.5       # tiempo que tarda en cambiar la barra con tab
-HEAT_COOL_S = 4.0        # el arma se recalienta si se mantiene el clic: soltar este tiempo (la munición no es el problema)
 MAX_HEAT = 2             # recalentamientos seguidos antes de dar el objetivo por imposible
-SIEGE_SPEED = 0.3        # con Siege el mouse mueve la cámara: a 0.3 de velocidad para que no gire y gire
+TEST_HOLD_S = 1.0        # modo prueba: segundos que se mantiene el fijado antes de soltarlo con shift
+TEST_RELEASE_S = 1.5     # modo prueba: tras soltar, tiempo para llevar la mira a otro enemigo
+AGGRO_MATCH_PX = 90     # una caja del modelo a menos de esto del punto de las flechas rojas es el que me marca
+AGGRO_CONF = 0.91        # conf de la caja sintética creada desde las flechas rojas (sirve de marca)
+SIEGE_SPEED = 0.3       # con Siege el mouse mueve la cámara: a 0.3 de velocidad para que no gire y gire
 NUDGE_EVERY_S = 0.04     # tiempo mínimo entre empujes del mouse hacia el siguiente enemigo
 NUDGE_PX = 110           # empuje máximo del mouse por ciclo
 NUDGE_MIN_PX = 9         # empuje mínimo (cerca del objetivo)
@@ -135,6 +141,7 @@ class Bot:
         self.fps = 0.0
         self._afk_next, self._afk = 0.0, False
         self._last_msg: dict[str, float] = {}
+        self.test_lock, self.test_n = False, 0                       # modo prueba de fijado (scripts/bot.py --fijar): sin disparar
         self._reset()
 
     # ---------- utilidades ----------
@@ -166,6 +173,7 @@ class Bot:
         self.hover_t = None                     # desde cuándo el cursor está sobre un enemigo sin que se fije
         self.siege_on, self.siege_t, self.siege_hold = False, 0.0, 0.0   # Siege solo si el enemigo se mueve
         self.ammo_empty, self.heat, self.hot = False, None, False
+        self.fire_s, self.heat_t = 0.0, time.time()                 # segundos de fuego acumulados (calor del arma)
         self._diag_saved = False
         self.use_siege = self.cfg["controls"].get("use_siege", True)
         self.fresh_boxes: list = []
@@ -357,13 +365,22 @@ class Bot:
             self.ammo_t = time.time()
             self.ammo = ammo_counts(frame)
             self.ammo_empty = ammo_empty(frame)                      # icono rojo: sin munición aunque no se lean los dígitos
-        self.heat = heat_bar(frame)
-        self.aggro = red_arrows(frame)                               # quién me marca (el enemigo está ~100 px bajo el cartel)
-        arrows = green_arrows(frame)                                 # fijado = flechas verdes a los costados (+ barra de vida)
+        self._heat_tick(time.time())                                 # calor del arma por tiempo de disparo (sin leer la barra)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)                 # una sola conversión para las dos búsquedas de flechas
+        self.red_n = getattr(self, "red_n", 0) + 1
+        if self.red_n % 3 == 1:                                      # los carteles rojos cambian despacio: 1 de cada 3 cuadros basta
+            self.aggro = red_arrows(frame, hsv)                               # quién me marca (el enemigo está ~100 px bajo el cartel)
+        arrows = green_arrows(frame, hsv)                                 # fijado = flechas verdes a los costados (+ barra de vida)
         seen = hp is not None or arrows is not None
         self.none_ticks = 0 if seen else self.none_ticks + 1
         locked = seen or (self.last_hp is not None and self.none_ticks < LOST_TICKS)   # un parpadeo no cuenta como "murió"
         on_lock = arrows is not None and cur is not None and math.hypot(arrows[0] - cur[0], arrows[1] - cur[1]) < ON_TARGET_PX
+        if self.test_lock:                                           # modo prueba de fijado: sin disparar ni Siege ni mantenimiento
+            if locked and time.time() >= self.release_until:
+                self.test_attack(hp if hp is not None else 1.0, arrows)
+            else:
+                self.search(frame, boxes, cur)
+            return
         if not locked:
             self._periodic(frame)
         if locked and (time.time() >= self.release_until or on_lock):    # el cursor sobre un fijado manda: no ir a otro
@@ -457,6 +474,40 @@ class Bot:
         self.known, self.tracks, self.dead = [], [], []                # la escena cambió un poco: se vuelve a aprender
         self.next_maneuver = time.time() + random.uniform(MANEUVER_MIN_S, MANEUVER_MAX_S)
 
+    # ---------- modo prueba de fijado ----------
+    def test_attack(self, hp: float, arrows) -> None:
+        """Solo comprueba el fijado: sin clic. Con el objetivo fijado espera TEST_HOLD_S, lo suelta con shift y deja que
+        search() mueva la mira a otro enemigo (el soltado queda en `avoid`)."""
+        now = time.time()
+        self.ctl.button_up("left")
+        self.aim.set_target(None)
+        if self.last_hp is None:
+            self.last_hp, self.hp_t = hp, now
+            self.test_n += 1
+            self.log(f"[PRUEBA] Fijado #{self.test_n} (vida {hp:.0%}, flechas {'sí' if arrows is not None else 'no'}).")
+        self.say("prueba", f"Prueba: fijado #{self.test_n}, lo suelto en {max(0.0, TEST_HOLD_S - (now - self.hp_t)):.1f} s.")
+        if now - self.hp_t >= TEST_HOLD_S:
+            self.ctl.tap("shift", 0.1)
+            self.release_until = now + TEST_RELEASE_S
+            tc = arrows if arrows is not None else self.target_c
+            if tc is not None:
+                self.avoid = (tc, now + AVOID_S)
+            self.last_hp = self.target_c = self.hover_t = None
+            self.log("[PRUEBA] Suelto con shift y busco otro (sin disparar).")
+
+    def _heat_tick(self, now: float) -> None:
+        """Modelo de calor por tiempo: con el clic pulsado sube; suelto baja al doble de rápido. Al llegar a FIRE_MAX_S
+        se suelta el clic COOL_S segundos (attack() lo respeta con cool_until)."""
+        dt = min(now - self.heat_t, 0.5)
+        self.heat_t = now
+        if "left" in self.ctl.buttons_down:
+            self.fire_s += dt
+            if self.fire_s >= FIRE_MAX_S and now >= self.cool_until:
+                self.cool_until = now + COOL_S
+                self.log(f"Arma caliente tras {self.fire_s:.0f} s de fuego: suelto el clic {COOL_S:.0f} s.")
+        else:
+            self.fire_s = max(0.0, self.fire_s - dt * FIRE_MAX_S / COOL_S)
+
     # ---------- ataque ----------
     def attack(self, frame, hp: float, arrows=None, cur=None) -> None:
         """Enemigo fijado (el juego lo fija solo al pasar el cursor): disparar con el arma estándar hasta que muera.
@@ -467,13 +518,6 @@ class Bot:
             self.ctl.button_up("left")
             self.hp_t = now
             self.say("calor", "Arma recalentada: espero a que se enfríe.", 2.0)
-            return
-        if self.heat is not None:                                    # barra naranja casi vacía: el arma se recalienta, soltar el clic
-            self.hot = self.heat < HEAT_LOW or (self.hot and self.heat < HEAT_OK)
-        if self.hot:
-            self.ctl.button_up("left")
-            self.hp_t = now
-            self.say("calor", f"Barra de calor baja ({self.heat:.0%}): suelto el clic hasta que se recupere.", 2.0)
             return
         if self._ammo_low():                                         # sin munición: no esperar 3 s para soltar y recargar
             self.hp_t = 0.0
@@ -587,11 +631,11 @@ class Bot:
             return
         std = self.ammo[0]
         ammo_low = self._ammo_low()
-        hot_bar = self.heat is not None and self.heat < HEAT_OK
-        if not ammo_low and hot_bar and self.heat_tries < MAX_HEAT:  # recalentada de verdad (barra naranja baja): soltar el clic y esperar
+        hot_bar = self.fire_s >= FIRE_MAX_S * 0.8
+        if not ammo_low and hot_bar and self.heat_tries < MAX_HEAT:  # casi recalentada: soltar el clic y esperar
             self.heat_tries += 1
-            self.cool_until = time.time() + HEAT_COOL_S
-            self.log(f"Sin daño con munición ({std}) y barra de calor al {self.heat:.0%}: suelto el clic {HEAT_COOL_S:.0f} s.")
+            self.cool_until = time.time() + COOL_S
+            self.log(f"Sin daño con munición ({std}) y {self.fire_s:.0f} s de fuego seguido: suelto el clic {COOL_S:.0f} s.")
             return
         self.stuck += 1
         if ammo_low:
@@ -640,9 +684,10 @@ class Bot:
             if all(math.hypot(kx - (b[0] + b[2]) / 2, ky - (b[1] + b[3]) / 2) > 60 for b in boxes)                     and all(math.hypot(kx - d[0][0], ky - d[0][1]) > 70 for d in self.dead):
                 boxes = boxes + [(kx - 40, ky - 55, kx + 40, ky + 55, 0.5)]
         boxes = [b for b in boxes if all(math.hypot((b[0] + b[2]) / 2 - d[0][0], (b[1] + b[3]) / 2 - d[0][1]) > 70 for d in self.dead)]
+        boxes = self._with_aggro(boxes)                              # los que me marcan (flechas rojas) entran aunque el modelo no los vea
         if self.siege_on:                                            # Siege en cadena: sin soltarlo entre enemigos, pero sin quedarse girando
             self.transit_t = self.transit_t or now
-            boxes = [b for b in boxes if b in self.fresh_boxes]        # solo lo visto ahora: la cámara se mueve
+            boxes = [b for b in boxes if b in self.fresh_boxes or b[4] == AGGRO_CONF]        # solo lo visto ahora: la cámara se mueve
             if boxes:
                 self.empty_since = None
                 self._siege_push(cur, boxes)
@@ -696,14 +741,32 @@ class Bot:
         self.aim.set_target(self.to_screen(fx * frame.shape[1], fy * frame.shape[0], frame))
         self.say("barrido", "Sin detecciones: barro la escena con la mira para que marque lo que haya.", 3)
 
+    def _with_aggro(self, boxes):
+        """Añade una caja sintética (conf AGGRO_CONF) por cada enemigo que me marca (flechas rojas) y que el modelo no
+        detectó o no coincide con ninguna caja; ni los recién muertos ni el soltado por no fijarse."""
+        out, now = list(boxes), time.time()
+        for ax, ay in self.aggro:
+            if any(math.hypot((b[0] + b[2]) / 2 - ax, (b[1] + b[3]) / 2 - ay) < AGGRO_MATCH_PX for b in boxes):
+                continue
+            if any(now - d[1] < DEAD_S and math.hypot(ax - d[0][0], ay - d[0][1]) < 70 for d in self.dead):
+                continue
+            if self.avoid and now < self.avoid[1] and math.hypot(ax - self.avoid[0][0], ay - self.avoid[0][1]) < 120:
+                continue
+            out.append((ax - 40, ay - 55, ax + 40, ay + 55, AGGRO_CONF))
+        return out
+
     def _choose(self, boxes, cur=None):
-        """El más CERCANO al cursor (así recorre los enemigos en línea); si ya había uno elegido, se queda con ese."""
+        """Primero los que me marcan (flechas rojas); luego el más CERCANO al cursor (así recorre los enemigos en línea);
+        si ya había uno elegido, se queda con ese."""
         def center(b):
             return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
         if self.avoid and time.time() < self.avoid[1]:               # descarta el objetivo soltado, si hay otros
             ax, ay = self.avoid[0]
             others = [b for b in boxes if math.hypot(center(b)[0] - ax, center(b)[1] - ay) > 120]
             boxes = others or boxes
+        if self.aggro:
+            pri = [b for b in boxes if any(math.hypot(center(b)[0] - ax, center(b)[1] - ay) < AGGRO_MATCH_PX for ax, ay in self.aggro)]
+            boxes = pri or boxes
         if self.target_c is not None:
             near = min(boxes, key=lambda b: math.hypot(center(b)[0] - self.target_c[0], center(b)[1] - self.target_c[1]))
             if math.hypot(center(near)[0] - self.target_c[0], center(near)[1] - self.target_c[1]) < 150:
