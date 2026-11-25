@@ -80,7 +80,8 @@ controls:
   toggle_key: [period, numpad_dot]   # "." inicia el bot si está detenido y lo pausa si funciona (f10 se descartó: existe en el juego)
   exit_key: [plus, numpad_plus]      # "+" cierra el programa entero
   use_siege: true                    # false = solo apunta y dispara con el arma estándar (sin Siege), pero con habilidades y recarga
-  siege_key: "1"                     # Siege Mode del A-GEAR (interruptor): más daño; detiene la nave; se apaga para ir al siguiente
+  siege_chain: false                 # false = NO activar Siege solo por haber más enemigos; solo si el fijado se mueve (_watch_motion)
+  siege_key: "1"                    # Siege Mode del A-GEAR (interruptor): más daño; detiene la nave; se apaga para ir al siguiente
   line_of_sight: true           # un obstáculo (árbol, relieve) entre la nave y el objetivo bloquea el daño aunque marque rango
   aggro_marker: red_arrows      # ▶▶ nombre ◀◀ en rojo sobre un enemigo = me está marcando y me atacará
   edge_warning: "OUT OF FLYING AREA"   # texto central: estás en el borde del mapa; hay que alejarse
@@ -129,3 +130,17 @@ train:
   epochs: 30
   imgsz: 640
   base_model: yolov8n.pt
+
+# Métricas por etapas (plan Fase 0): eventos y resumen en logs/etapas/<fecha>/
+metrics:
+  enabled: true
+  stage_s: 300               # duración de cada etapa en segundos (5 min)
+
+# Parámetros de comportamiento ajustables (plan Fase 2). Vacío = valores por defecto de src/bot.py.
+# Rangos permitidos: ver TUNABLE en src/bot.py (los valores fuera de rango se recortan).
+tuning: {}
+  # switch_ratio: 0.7        # cambiar de objetivo solo si el nuevo está a < 0.7x la distancia del actual al cursor
+  # min_dwell_s: 0.6         # y no antes de este tiempo desde la última elección
+  # ammo_low: 0              # recargar con la munición estándar <= este valor (0 = al llegar a 00000)
+  # hover_s: 2.5
+  # move_px: 18

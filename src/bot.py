@@ -17,8 +17,9 @@ from .afk_guard import afk_dialog_visible
 from .capture import ScreenCapture, find_hwnd
 from .config import ROOT
 from .control import Controls, is_foreground, user32
-from .hud import _bar_match, ammo_counts, ammo_empty, buff_count, heat_bar, green_arrows, red_arrows, skill_key, target_hp
+from .hud import _bar_match, ammo_counts, ammo_empty, buff_count, target_distance, heat_bar, green_arrows, red_arrows, skill_key, target_hp
 from .killswitch import Toggle
+from .metrics import Metrics
 from .overlay_widget import visible_rect
 
 try:                                    # coordenadas físicas: la mira es el cursor y Windows escala al 125 %
@@ -43,7 +44,7 @@ MOVE_WINDOW_S = 0.8      # ventana en la que se mide si las flechas verdes (el e
 MOVE_PX = 18             # desplazamiento en esa ventana que se toma como "el enemigo se mueve"
 DOUBT_CONF = 0.4         # por debajo: detección dudosa; la mira va a comprobarla y si no se fija en HOVER_DOUBT_S se descarta
 HOVER_DOUBT_S = 1.2
-AMMO_LOW = 100           # munición estándar por debajo de esto: recargar (caja de recarga, slot 0 de la barra 1)
+AMMO_LOW = 0             # munición estándar igual o por debajo de esto: recargar (0 = al llegar a 00000 en rojo)
 MAINT_EVERY_S = 2.0      # cada cuánto se revisan munición y buffs (solo sin enemigo fijado)
 BUFF_RETRY_S = 45.0      # tras lanzar buffs no se reintenta antes de esto: las habilidades tienen tiempo de reuso
 AMMO_RETRY_S = 45.0
@@ -73,6 +74,35 @@ SCAN_POINTS = [(0.5, 0.45), (0.25, 0.4), (0.15, 0.55), (0.35, 0.3), (0.5, 0.3), 
                (0.65, 0.55), (0.5, 0.55), (0.35, 0.55)]   # fracciones del cuadro; evita el HUD de las esquinas y la nave
 SCAN_STEP_S = 1.2        # tiempo en cada punto del barrido
 STATS_EVERY_S = 60.0     # resumen en el log (sesiones largas)
+SWITCH_RATIO = 0.7       # histéresis (plan 1a): solo se cambia de objetivo si el nuevo está a < esta fracción de la distancia del actual al cursor
+MIN_DWELL_S = 0.6        # y no antes de este tiempo desde la última elección
+SAME_TARGET_PX = 150     # una caja a menos de esto del objetivo elegido es "el mismo"
+
+# Parámetros ajustables desde config.yaml -> tuning: (nombre: (mín, máx)); los valores fuera de rango se recortan.
+# Teclas, anti-AFK, killswitch y límites de seguridad (MAX_FAILS, calor) NO están aquí a propósito.
+TUNABLE = {
+    "SWITCH_RATIO": (0.3, 1.0), "MIN_DWELL_S": (0.0, 2.0), "AMMO_LOW": (0, 500),
+    "HOVER_S": (1.0, 5.0), "HOVER_DOUBT_S": (0.5, 3.0), "DOUBT_CONF": (0.2, 0.7),
+    "MOVE_PX": (8, 40), "MOVE_WINDOW_S": (0.4, 1.5),
+    "SIEGE_TRANSIT_MAX_S": (1.0, 5.0), "SIEGE_EMPTY_S": (0.5, 3.0), "SIEGE_NO_DAMAGE_S": (1.0, 4.0),
+    "SCAN_AFTER_S": (0.5, 4.0), "SCAN_STEP_S": (0.5, 3.0),
+    "NUDGE_PX": (40, 200), "NUDGE_MIN_PX": (3, 20),
+    "DEAD_S": (1.0, 10.0), "KNOWN_TTL_S": (5.0, 60.0),
+}
+
+
+def apply_tuning(tuning: dict | None, log=print) -> dict:
+    """Aplica la sección `tuning:` de config.yaml a las constantes del módulo (Fase 2). Devuelve lo aplicado."""
+    applied = {}
+    for k, v in (tuning or {}).items():
+        k = str(k).upper()
+        if k not in TUNABLE or not isinstance(v, (int, float)) or isinstance(v, bool):
+            log(f"[tuning] '{k}' ignorado (no es un parámetro ajustable).")
+            continue
+        lo, hi = TUNABLE[k]
+        globals()[k] = type(globals()[k])(min(max(v, lo), hi))
+        applied[k] = globals()[k]
+    return applied
 
 
 class Aim(threading.Thread):
@@ -123,6 +153,9 @@ class Bot:
     def __init__(self, cfg: dict, view_cb=None):
         from ultralytics import YOLO
         self.cfg = cfg
+        applied = apply_tuning(cfg.get("tuning"), self.log)
+        if applied:
+            self.log(f"[tuning] aplicado: {applied}")
         d = cfg["detector"]
         self.model = YOLO(str(ROOT / d["yolo_weights"]))
         self.conf, self.max_det = d["conf"], d.get("max_det", 10)
@@ -142,9 +175,22 @@ class Bot:
         self._afk_next, self._afk = 0.0, False
         self._last_msg: dict[str, float] = {}
         self.test_lock, self.test_n = False, 0                       # modo prueba de fijado (scripts/bot.py --fijar): sin disparar
+        mc = cfg.get("metrics") or {}
+        self.m = Metrics(ROOT, enabled=mc.get("enabled", True), stage_s=float(mc.get("stage_s", 300)),
+                         meta={"device": self._device_info(), "tuning": applied})
+        self.log(f"Dispositivo de inferencia: {self.m.meta['device']}")
         self._reset()
 
     # ---------- utilidades ----------
+    def _device_info(self) -> str:
+        try:
+            import torch
+            cuda = torch.cuda.is_available()
+            dev = next(self.model.model.parameters()).device
+            return f"cuda={cuda}, modelo en {dev}" + (f" ({torch.cuda.get_device_name(0)})" if cuda else "")
+        except Exception as e:  # noqa: BLE001
+            return f"desconocido ({e})"
+
     def log(self, msg: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -176,6 +222,7 @@ class Bot:
         self.fire_s, self.heat_t = 0.0, time.time()                 # segundos de fuego acumulados (calor del arma)
         self._diag_saved = False
         self.use_siege = self.cfg["controls"].get("use_siege", True)
+        self.siege_chain = self.cfg["controls"].get("siege_chain", True)   # false: Siege solo si el enemigo fijado se mueve
         self.fresh_boxes: list = []
         self.ammo = (None, None)                # (estándar, avanzada) leídas del HUD
         self.ammo_t, self.maint_t = 0.0, 0.0
@@ -190,6 +237,10 @@ class Bot:
         self.empty_since = None                 # desde cuándo no hay ningún enemigo a la vista
         self.scan_i, self.scan_t = 0, 0.0       # barrido de la mira cuando no hay detecciones
         self.t_start, self.stats_t = now, now + STATS_EVERY_S
+        self.choice_c, self.choice_t = None, 0.0   # objetivo elegido por _choose (histéresis, plan 1a)
+        self.lock_dist, self.dist_t, self.oor_until = None, 0.0, 0.0   # distancia al fijado (número bajo el anillo)
+        self.dist_crops = 0
+        self.range_std = float((self.cfg["controls"].get("radar", {}).get("gear_A", {}) or {}).get("lock_range_std", 1350))
 
     def shutdown(self) -> None:
         self.stop = True
@@ -283,15 +334,19 @@ class Bot:
         try:
             self.warmup()
             while not self.stop:
+                t_loop = time.perf_counter()
                 try:
-                    frame = self._grab(2.0)
+                    with self.m.timer("grab"):
+                        frame = self._grab(2.0)
                 except RuntimeError:
                     continue
-                hp = target_hp(frame)
+                with self.m.timer("hp"):
+                    hp = target_hp(frame)
                 if active and self.last_hp is not None and hp is not None and not self.siege_on:    # disparando a uno fijado: sin YOLO (más fps, el clic no se corta)
                     boxes = self._last_boxes
                 else:
-                    boxes = self._last_boxes = self._track(self._detect(frame))   # cajas estables, sin temblor ni falsos de un cuadro
+                    with self.m.timer("detect"):
+                        boxes = self._last_boxes = self._track(self._detect(frame))   # cajas estables, sin temblor ni falsos de un cuadro
                 cur = self.cursor_in_frame(frame)
                 now = time.time()
                 self.fps = 0.9 * self.fps + 0.1 / max(now - t_prev, 1e-6)
@@ -300,6 +355,7 @@ class Bot:
                 if self.toggle.running and not active:
                     active = True
                     self._reset()
+                    self.m.start()
                     self.log("Bot ACTIVO.")
                     hwnd = find_hwnd(self.cfg["capture"])
                     if hwnd:
@@ -307,16 +363,21 @@ class Bot:
                         time.sleep(0.3)
                 elif not self.toggle.running and active:
                     active = False
+                    self.m.stop()
                     self.aim.set_target(None)
                     self.ctl.release_all()
                     self.msg = f"Detenido · calabazas eliminadas: {self.kills}"
                     self.log(f"Bot detenido. Calabazas eliminadas: {self.kills}")
                 if active:
-                    self.step(frame, boxes, cur, hp)
+                    with self.m.timer("step"):
+                        self.step(frame, boxes, cur, hp)
                 elif not self.msg.startswith("Detenido"):
                     self.msg = "Esperando el botón de inicio"
                 self.publish(frame, boxes, cur, active)
+                if active:
+                    self.m.timers["loop"].append(time.perf_counter() - t_loop)
         finally:
+            self.m.stop()
             self.shutdown()
 
     def publish(self, frame, boxes, cur, active: bool) -> None:
@@ -375,6 +436,7 @@ class Bot:
         self.none_ticks = 0 if seen else self.none_ticks + 1
         locked = seen or (self.last_hp is not None and self.none_ticks < LOST_TICKS)   # un parpadeo no cuenta como "murió"
         on_lock = arrows is not None and cur is not None and math.hypot(arrows[0] - cur[0], arrows[1] - cur[1]) < ON_TARGET_PX
+        self.m.tick(locked, self.siege_on, self._ammo_low())
         if self.test_lock:                                           # modo prueba de fijado: sin disparar ni Siege ni mantenimiento
             if locked and time.time() >= self.release_until:
                 self.test_attack(hp if hp is not None else 1.0, arrows)
@@ -395,7 +457,9 @@ class Bot:
         if now >= self.stats_t:
             self.stats_t = now + STATS_EVERY_S
             mins = (now - self.t_start) / 60
-            self.log(f"[{mins:.1f} min] eliminados: {self.kills} ({self.kills / max(mins, 1e-6):.1f}/min), fps {self.fps:.0f}")
+            lat = self.m.timers["loop"]
+            ms = f", ciclo {1000 * sum(lat[-200:]) / len(lat[-200:]):.0f} ms" if lat else ""
+            self.log(f"[{mins:.1f} min] eliminados: {self.kills} ({self.kills / max(mins, 1e-6):.1f}/min), fps {self.fps:.0f}{ms}")
         if now >= self.next_maneuver and self.last_hp is None and not self.siege_on:
             self.maneuver()
         elif self.last_hp is None:
@@ -410,12 +474,16 @@ class Bot:
         if self._ammo_low() and now >= self.ammo_cool:
             self.ammo_cool = now + AMMO_RETRY_S
             self.log(f"Munición estándar en {self.ammo[0]}: uso la caja de recarga.")
+            self.m.count("reloads")
+            self.m.event("reload", ammo=self.ammo[0], empty=self.ammo_empty)
             self.cast([("ammo_recharge_box", 0.45)])
             return
         bc = buff_count(frame)
         if bc is not None and bc < 2 and now >= self.buff_cool:
             self.buff_cool = now + BUFF_RETRY_S
             self.log(f"Buffs activos: {bc}. Los renuevo (fire_shot y concentration).")
+            self.m.count("buff_casts")
+            self.m.event("buffs", active=bc)
             self.cast([("fire_shot", 0.6), ("concentration", 0.6)])   # en reuso el icono sale oscuro: 0.6-0.7
 
     def _ammo_low(self) -> bool:
@@ -504,6 +572,8 @@ class Bot:
             self.fire_s += dt
             if self.fire_s >= FIRE_MAX_S and now >= self.cool_until:
                 self.cool_until = now + COOL_S
+                self.m.count("heats")
+                self.m.event("heat", fire_s=round(self.fire_s, 1))
                 self.log(f"Arma caliente tras {self.fire_s:.0f} s de fuego: suelto el clic {COOL_S:.0f} s.")
         else:
             self.fire_s = max(0.0, self.fire_s - dt * FIRE_MAX_S / COOL_S)
@@ -519,6 +589,10 @@ class Bot:
             self.hp_t = now
             self.say("calor", "Arma recalentada: espero a que se enfríe.", 2.0)
             return
+        dist = self._lock_distance(frame, arrows, now)
+        if arrows is not None and ((dist is not None and dist > self.range_std) or now < self.oor_until):
+            self._out_of_range(frame, dist, arrows, now)                    # fuera del rango del arma estándar: no disparar, soltar e ir a otro
+            return
         if self._ammo_low():                                         # sin munición: no esperar 3 s para soltar y recargar
             self.hp_t = 0.0
         on_target = arrows is not None and cur is not None and math.hypot(arrows[0] - cur[0], arrows[1] - cur[1]) < ON_TARGET_PX
@@ -530,6 +604,8 @@ class Bot:
                 self.ctl.button_up("left")
                 time.sleep(0.05)
                 self.ctl.button_down("left")
+                self.m.count("reclics")
+                self.m.event("reclic", siege=self.siege_on)
                 self.log("Reclic: sigue fijado y no baja la vida.")
             self.transit_t = None
             if arrows is not None:
@@ -541,7 +617,7 @@ class Bot:
             if on_target:
                 self.on_target_t = now
                 self._watch_motion(arrows, now)
-                if not self.siege_on and self._candidates(arrows):       # hay más enemigos: Siege en cadena (mata uno y ya va al siguiente)
+                if self.siege_chain and not self.siege_on and self._candidates(arrows):       # hay más enemigos: Siege en cadena (mata uno y ya va al siguiente)
                     self.log("Hay más enemigos a la vista: Siege en cadena.")
                     self.siege(True)
         else:
@@ -549,6 +625,7 @@ class Bot:
             self.aim.set_target(self.to_screen(*arrows, frame) if arrows is not None else None)
         if self.last_hp is None:
             self.last_hp, self.hp_t, self.stuck = hp, now, 0
+            self.m.locked_on()
             self.log(f"Enemigo fijado, vida {hp:.0%}. Disparo.")
         if hp < self.last_hp - 0.004:
             self.last_hp, self.hp_t, self.stuck, self.fails, self.heat_tries = hp, now, 0, 0, 0
@@ -556,6 +633,49 @@ class Bot:
             self.unstick()
             self.hp_t = now
         self.say("vida", f"Disparando · vida del objetivo {hp:.0%}")
+
+    def _lock_distance(self, frame, arrows, now: float):
+        """Lee el número de distancia bajo el fijado (3 veces por segundo). Si no se puede leer guarda unos recortes
+        (logs/dist_crops) para aprender los dígitos que falten con scripts/aprender_distancia.py."""
+        if arrows is None:
+            self.lock_dist = None
+            return None
+        if now - self.dist_t >= 0.3:
+            self.dist_t = now
+            d = target_distance(frame, arrows)
+            if d is None and self.dist_crops < 30:
+                self.dist_crops += 1
+                h, w = frame.shape[:2]
+                x, y = int(arrows[0]), int(arrows[1])
+                out = ROOT / "logs" / "dist_crops"
+                out.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(out / f"{time.strftime('%H%M%S')}_{x}_{y}.png"), frame[y + int(40 * h / 1080):y + int(110 * h / 1080), max(0, x - 80):x + 80])
+            self.lock_dist = d
+        return self.lock_dist
+
+    def _out_of_range(self, frame, dist, arrows, now: float) -> None:
+        """El fijado está más lejos que lock_range_std: disparar no hace daño. Suelta con shift (una vez por segundo) y
+        mueve la mira al enemigo más cercano que quede."""
+        self.ctl.button_up("left")
+        self.hp_t = now
+        if now >= self.oor_until:
+            self.oor_until = now + 1.0
+            self.log(f"Fijado a {dist} (rango {self.range_std:.0f}): fuera de alcance, lo suelto y busco otro.")
+            self.m.count("out_of_range")
+            self.m.event("out_of_range", dist=dist)
+            if self.siege_on:
+                self.siege(False)
+                time.sleep(0.5)
+            self.ctl.tap("shift", 0.1)
+            self.release_until = now + 1.5
+            self.avoid = (arrows, now + AVOID_S)
+            self.choice_c = self.target_c = None
+        cands = self._candidates(arrows)
+        cur_xy = self.aim.target
+        if cands and cur_xy is None:
+            b = min(cands, key=lambda c: math.hypot((c[0] + c[2]) / 2 - arrows[0], (c[1] + c[3]) / 2 - arrows[1]))
+            self.aim.set_target(self.to_screen((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, frame))
+        self.say("rango", f"Objetivo fuera de alcance ({dist}): no disparo.", 2.0)
 
     def _candidates(self, exclude=None) -> list:
         """Enemigos detectados a los que ir después: sin los recién muertos ni el que está fijado (`exclude`)."""
@@ -638,13 +758,17 @@ class Bot:
             self.log(f"Sin daño con munición ({std}) y {self.fire_s:.0f} s de fuego seguido: suelto el clic {COOL_S:.0f} s.")
             return
         self.stuck += 1
+        self.choice_c = None                                         # el objetivo se suelta: la histéresis empieza de cero
+        self.m.count("unsticks")
+        self.m.event("unstick", ammo_low=ammo_low, ammo=std, siege=self.siege_on, dist=self.lock_dist)
         if ammo_low:
             self.ammo_cool = 0.0                                     # recargar en cuanto no haya enemigo fijado
             self.log("Sin munición estándar: suelto el objetivo para recargar.")
         else:
             self.fails += 1
         self.log(f"Fijado sin daño en {NO_DAMAGE_S:.0f} s: suelto con shift y busco otro objetivo.")
-        if self.siege_on and not self._candidates(self.target_c):   # en cadena y quedan otros: Siege se queda, solo se suelta este
+        # en cadena y quedan otros: Siege se queda, solo se suelta este; pero sin munición se sale de Siege para poder recargar (plan 1b)
+        if self.siege_on and (ammo_low or not self._candidates(self.target_c)):
             self.siege(False)
             self.transit_t = None
             time.sleep(0.5)
@@ -668,6 +792,8 @@ class Bot:
         if self.last_hp is not None:                                 # había uno fijado y ya no hay barra: murió y la mira se soltó sola
             self.kills += 1
             self.log(f"Enemigo eliminado (total {self.kills}).")
+            self.m.kill(dist=self.lock_dist)
+            self.choice_c = None
             if self.target_c is not None:
                 self.dead.append((self.target_c, time.time()))
                 tc = self.target_c                                   # y borrarla del mapa: si no, volvía como "fantasma"
@@ -717,6 +843,9 @@ class Bot:
             self.say("fijar", f"Cursor sobre el enemigo (conf {c:.2f}): esperando que el juego lo fije.")
             if now - self.hover_t > (HOVER_DOUBT_S if c < DOUBT_CONF else HOVER_S):
                 self.log("No se fija (¿lejos u obstáculo?): elijo otro enemigo.")
+                self.m.count("no_fix")
+                self.m.event("no_fix", conf=round(c, 2))
+                self.choice_c = None
                 self.avoid = ((tx, ty), now + AVOID_S)
                 self.target_c = None
                 self.hover_t = None
@@ -767,10 +896,25 @@ class Bot:
         if self.aggro:
             pri = [b for b in boxes if any(math.hypot(center(b)[0] - ax, center(b)[1] - ay) < AGGRO_MATCH_PX for ax, ay in self.aggro)]
             boxes = pri or boxes
-        if self.target_c is not None:
-            near = min(boxes, key=lambda b: math.hypot(center(b)[0] - self.target_c[0], center(b)[1] - self.target_c[1]))
-            if math.hypot(center(near)[0] - self.target_c[0], center(near)[1] - self.target_c[1]) < 150:
-                return near
         if cur is not None:
-            return min(boxes, key=lambda b: math.hypot(center(b)[0] - cur[0], center(b)[1] - cur[1]))
-        return max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+            best = min(boxes, key=lambda b: math.hypot(center(b)[0] - cur[0], center(b)[1] - cur[1]))
+        else:
+            best = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        now = time.time()
+        pick, kept = best, False
+        if self.choice_c is not None:                                # histéresis (plan 1a): conservar el elegido salvo mejora clara
+            cc = self.choice_c
+            near = min(boxes, key=lambda b: math.hypot(center(b)[0] - cc[0], center(b)[1] - cc[1]))
+            if math.hypot(center(near)[0] - cc[0], center(near)[1] - cc[1]) < SAME_TARGET_PX:
+                pick, kept = near, True                              # sigue el mismo objetivo (o su caja más próxima)
+                if near is not best and cur is not None:
+                    d_best = math.hypot(center(best)[0] - cur[0], center(best)[1] - cur[1])
+                    d_near = math.hypot(center(near)[0] - cur[0], center(near)[1] - cur[1])
+                    if now - self.choice_t >= MIN_DWELL_S and d_best < SWITCH_RATIO * d_near:
+                        pick, kept = best, False
+                        self.m.switch()
+                        self.m.event("switch", d_old=round(d_near), d_new=round(d_best))
+        if not kept:
+            self.choice_t = now                                      # elección nueva (tras matar, soltar, perderlo o cambiar)
+        self.choice_c = center(pick)
+        return pick

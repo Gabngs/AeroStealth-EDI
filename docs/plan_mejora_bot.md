@@ -1,6 +1,8 @@
 # Plan de mejora del bot: decisiones más naturales, ágiles y medibles
 
-Estado: **propuesta**. Todo lo de abajo sale de leer `src/bot.py`, `config.yaml`, `src/hud.py` y `logs/`.
+**Implementado (2026-11-24, sin probar contra el juego):** Fase 0 (`src/metrics.py`), 1a (histéresis en `_choose`), 1b (recarga a 0 y salida de Siege para recargar) y Fase 2 (`tuning:` y `metrics:` en `config.yaml`). **Pendiente:** 1c (cooldown por skill con OCR), Fase 3 (tuner), Fase 4 (red).
+
+Estado original: **propuesta**. Todo lo de abajo sale de leer `src/bot.py`, `config.yaml`, `src/hud.py` y `logs/`.
 No se ha ejecutado ni medido nada todavía (ver «Qué no se pudo comprobar»).
 
 ## 1. Lo que ya existe (y que cambia el punto de partida)

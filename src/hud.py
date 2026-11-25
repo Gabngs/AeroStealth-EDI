@@ -312,3 +312,66 @@ def heat_bar(frame):
         if m[x]:
             end = x
     return float(max(0.0, min(1.0, (end - left + 1) / (88 * k))))
+
+
+# ---------- distancia al objetivo fijado: número blanco con borde negro bajo el anillo ----------
+_DIST = None
+
+
+def _dist_cells(frame, anchor):
+    """Recortes normalizados (10x14) de los dígitos del número que sale bajo el objetivo fijado; `anchor` = centro de las
+    flechas verdes. Lista vacía si no se ve ningún número."""
+    h, w = frame.shape[:2]
+    k = w / 1920.0
+    ax, ay = int(anchor[0]), int(anchor[1])
+    y0, y1 = max(0, int(ay + 55 * k)), min(h, int(ay + 100 * k))
+    x0, x1 = max(0, int(ax - 70 * k)), min(w, int(ax + 70 * k))
+    if y1 <= y0 or x1 <= x0:
+        return []
+    hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    mk = ((hsv[..., 2] > 215) & (hsv[..., 1] < 60)).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(mk)
+    blobs = [i for i in range(1, n) if 6 * k <= st[i, 3] <= 20 * k and st[i, 4] >= 8 * k * k]
+    if not blobs:
+        return []
+    top = int(np.median([st[i, 1] for i in blobs]))
+    blobs = sorted((i for i in blobs if abs(st[i, 1] - top) <= 3 * k), key=lambda i: st[i, 0])   # una sola fila de texto
+    if not 3 <= len(blobs) <= 5:
+        return []
+    r0 = min(st[i, 1] for i in blobs)
+    r1 = max(st[i, 1] + st[i, 3] for i in blobs)
+    cells = []
+    for i in blobs:
+        x, bw = st[i, 0], st[i, 2]
+        crop = (lab[r0:r1, x:x + bw] == i).astype(np.float32)
+        cells.append(cv2.resize(crop, CELL, interpolation=cv2.INTER_AREA))
+    return cells
+
+
+def _load_dist():
+    global _DIST
+    if _DIST is None:
+        from .config import ROOT
+        p = ROOT / "assets" / "dist_digits.npz"
+        _DIST = dict(np.load(p)) if p.exists() else {}
+    return _DIST
+
+
+def target_distance(frame, anchor):
+    """Distancia (int) al objetivo fijado leída del número bajo el anillo, o None si no se ve o algún dígito no se conoce."""
+    if anchor is None:
+        return None
+    cells, lib = _dist_cells(frame, anchor), _load_dist()
+    if not cells or not lib:
+        return None
+    out = ""
+    for c in cells:
+        d, best = None, 1e9
+        for name, t in lib.items():
+            e = float(np.abs(c - t).mean())
+            if e < best:
+                d, best = name, e
+        if d is None or best >= 0.25:
+            return None
+        out += d
+    return int(out)
